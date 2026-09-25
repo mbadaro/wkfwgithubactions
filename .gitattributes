@@ -1,0 +1,2 @@
+# Normaliza para LF no repositorio (o runner do CI e Linux)
+* text=auto eol=lf

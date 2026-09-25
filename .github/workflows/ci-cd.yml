@@ -1,0 +1,177 @@
+# .github/workflows/ci-cd.yml
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# Permissoes minimas por padrao
+permissions:
+  contents: read
+
+# Cancelar execucoes obsoletas na mesma branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ESTAGIO 1: Testes e qualidade
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configurar Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # O "|" abre um bloco multi-linha: sem ele o YAML junta
+      # todos os comandos numa unica linha.
+      - name: Instalar dependencias
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Verificar formatacao e linting (ruff)
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Rodar testes com cobertura
+        run: pytest --cov=app --cov-report=term-missing
+
+      - name: Upload do relatorio de cobertura
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura
+          path: .coverage
+          retention-days: 7
+          include-hidden-files: true
+
+  # ESTAGIO 2: Build e push da imagem Docker
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Permissoes especificas para publicar no ghcr
+    permissions:
+      contents: read
+      packages: write
+    # So constroi em push (nao em pull_request)
+    if: ${{ github.event_name == 'push' }}
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Login no GitHub Container Registry
+      - name: Login no ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extrair metadados (tags e labels) automaticamente.
+      # Atencao: nao pode haver espacos dentro de cada "type=..."
+      - name: Extrair metadados
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Construir e publicar a imagem
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Cache de camadas Docker via GitHub Actions cache
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ESTAGIO 3: Deploy em staging (automatico)
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Usa o environment 'staging' (com seus secrets e variaveis)
+    environment: staging
+    permissions:
+      contents: read
+    if: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # --- DEPLOY SIMULADO ---
+      # Este curso nao provisiona AWS, entao o deploy apenas imprime
+      # o que faria. Para um deploy real, descomente o bloco abaixo,
+      # crie um IAM Role com trust no OIDC do GitHub, defina a variavel
+      # AWS_ROLE_STAGING e adicione "id-token: write" em permissions.
+      #
+      # - name: Configurar credenciais AWS
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ vars.AWS_ROLE_STAGING }}
+      #     aws-region: us-east-1
+      #
+      # - name: Atualizar servico ECS
+      #   run: |
+      #     aws ecs update-service \
+      #       --cluster staging \
+      #       --service minha-api \
+      #       --force-new-deployment
+
+      - name: Deploy para staging (simulado)
+        run: |
+          echo "Fazendo deploy da imagem em staging..."
+          echo "Imagem: ${{ needs.build.outputs.image-tag }}"
+
+  # ESTAGIO 4: Deploy em producao (com aprovacao)
+  deploy-producao:
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # O environment 'producao' e onde se configuram as regras de
+    # protecao (revisores obrigatorios) pela interface do GitHub.
+    environment: producao
+    permissions:
+      contents: read
+    # So faz deploy em producao a partir da branch main
+    if: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Mesmo esquema do estagio 3: descomente para um deploy real.
+      # - name: Configurar credenciais AWS
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: ${{ vars.AWS_ROLE_PRODUCAO }}
+      #     aws-region: us-east-1
+
+      - name: Deploy para producao (simulado)
+        run: |
+          echo "Fazendo deploy da imagem em producao..."
+          echo "Imagem: ${{ needs.build.outputs.image-tag }}"
+
+      - name: Notificar sucesso
+        if: success()
+        run: echo "Deploy em producao concluido com sucesso!"
