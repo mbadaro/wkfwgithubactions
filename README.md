@@ -1,7 +1,6 @@
 # Minha API
 
-API inicial em FastAPI, usada para demonstrar um pipeline de CI/CD
-com GitHub Actions.
+API inicial em FastAPI, usada para demonstrar um pipeline de CI/CD com GitHub Actions.
 
 ## Como executar
 
